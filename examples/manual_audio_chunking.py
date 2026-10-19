@@ -18,16 +18,20 @@ import wave
 try:
     from whisper_live.client import StreamingTranscriptionClient
     from whisper_live.utils import resample
-except ImportError: # just in case whisper_live isn't installed.
+except ImportError:  # just in case whisper_live isn't installed.
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    print("[INFO] whisper_live not installed or the current version does not have StreamingTranscriptionClient. Will attempt to import from local source.")
+    print(
+        "[INFO] whisper_live not installed or the current version does not have StreamingTranscriptionClient. Will attempt to import from local source."
+    )
     from whisper_live.client import StreamingTranscriptionClient
     from whisper_live.utils import resample
 
 SAMPLE_RATE = 16000
 
 
-def stream_audio_file(path: str, client: StreamingTranscriptionClient, chunk_ms: int = 50) -> None:
+def stream_audio_file(
+    path: str, client: StreamingTranscriptionClient, chunk_ms: int = 50
+) -> None:
     """Read an audio file, resample to 16 kHz mono if needed, and pace chunks in real time."""
     resampled_path = resample(path)
     try:
@@ -43,20 +47,36 @@ def stream_audio_file(path: str, client: StreamingTranscriptionClient, chunk_ms:
 
 def main():
     parser = argparse.ArgumentParser(description="Stream an audio file to WhisperLive.")
-    parser.add_argument("--file", "-f", required=True, help="Audio file to transcribe (any format supported by ffmpeg).")
+    parser.add_argument(
+        "--file",
+        "-f",
+        required=True,
+        help="Audio file to transcribe (any format supported by ffmpeg).",
+    )
     parser.add_argument("--server", "-s", default="localhost")
     parser.add_argument("--port", "-p", type=int, default=9090)
     parser.add_argument("--model", "-m", default="small")
     parser.add_argument("--lang", "-l", default="en")
     parser.add_argument("--chunk_ms", type=int, default=50, help="Chunk size in ms.")
+    ##hotwords
+    parser.add_argument(
+        "--hotwords",
+        type=str,
+        default=None,
+        help="Comma-separated technical terms for faster-whisper",
+    )
     args = parser.parse_args()
 
     client = StreamingTranscriptionClient(
-        args.server, args.port,
+        args.server,
+        args.port,
         lang=args.lang,
         model=args.model,
+        hotwords=args.hotwords,
         on_session_started=lambda: print("[INFO] Server ready.\n"),
-        on_partial_transcript=lambda text, _: print(f"\r… {text:<80}", end="", flush=True),
+        on_partial_transcript=lambda text, _: print(
+            f"\r… {text:<80}", end="", flush=True
+        ),
         on_committed_transcript=lambda text, _: print(f"\r✓ {text:<80}"),
         on_error=lambda e: print(f"\n[ERROR] {e}"),
         on_close=lambda: print("\n[INFO] Connection closed."),
@@ -68,10 +88,14 @@ def main():
 
     print("\n[INFO] Final transcript:")
     for seg in client.transcript:
-        print(f"  [{float(seg['start']):.2f}s → {float(seg['end']):.2f}s] {seg['text'].strip()}")
+        print(
+            f"  [{float(seg['start']):.2f}s → {float(seg['end']):.2f}s] {seg['text'].strip()}"
+        )
     seg = client.last_partial
     if seg:
-        print(f"  [{float(seg['start']):.2f}s → {float(seg['end']):.2f}s] {seg['text'].strip()} (partial)")
+        print(
+            f"  [{float(seg['start']):.2f}s → {float(seg['end']):.2f}s] {seg['text'].strip()} (partial)"
+        )
 
 
 if __name__ == "__main__":

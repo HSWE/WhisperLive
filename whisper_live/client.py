@@ -1,17 +1,18 @@
+import json
+import logging
 import os
 import shutil
+import threading
+import time
+import uuid
 import wave
+from typing import Callable, Literal, Optional
 
-import logging
+import av
 import numpy as np
 import pyaudio
-import threading
-import json
 import websocket
-import uuid
-import time
-import av
-from typing import Callable, Literal, Optional
+
 import whisper_live.utils as utils
 
 
@@ -19,6 +20,7 @@ class Client:
     """
     Handles communication with a server using WebSocket.
     """
+
     INSTANCES = {}
     END_OF_AUDIO = "END_OF_AUDIO"
     NORMAL_CLOSURE = 1000
@@ -141,7 +143,7 @@ class Client:
         if host is not None and port is not None:
             self.host = host
             self.port = port
-            socket_protocol = 'wss' if self.use_wss else "ws"
+            socket_protocol = "wss" if self.use_wss else "ws"
             self.socket_url = f"{socket_protocol}://{host}:{port}"
             self._create_websocket()
         else:
@@ -177,7 +179,9 @@ class Client:
         status = message_data["status"]
         if status == "WAIT":
             self.waiting = True
-            print(f"[INFO]: Server is full. Estimated wait time {round(message_data['message'])} minutes.")
+            print(
+                f"[INFO]: Server is full. Estimated wait time {round(message_data['message'])} minutes."
+            )
         elif status == "ERROR":
             print(f"Message from Server: {message_data['message']}")
             self.server_error = True
@@ -192,16 +196,25 @@ class Client:
                 text.append(seg["text"].strip())
                 if i == len(segments) - 1 and not seg.get("completed", False):
                     self.last_segment = seg
-                elif self.server_backend == "faster_whisper" and seg.get("completed", False):
+                elif self.server_backend == "faster_whisper" and seg.get(
+                    "completed", False
+                ):
                     if translated:
-                        if (not self.translated_transcript or float(seg['start']) >= float(self.translated_transcript[-1]['end'])):
+                        if not self.translated_transcript or float(
+                            seg["start"]
+                        ) >= float(self.translated_transcript[-1]["end"]):
                             self.translated_transcript.append(seg)
                     else:
-                        if (not self.transcript or float(seg['start']) >= float(self.transcript[-1]['end'])):
+                        if not self.transcript or float(seg["start"]) >= float(
+                            self.transcript[-1]["end"]
+                        ):
                             self.transcript.append(seg)
         # update last received segment and last valid response time
         if not translated:
-            if self.last_received_segment is None or self.last_received_segment != segments[-1]["text"]:
+            if (
+                self.last_received_segment is None
+                or self.last_received_segment != segments[-1]["text"]
+            ):
                 self.last_response_received = time.time()
                 self.last_received_segment = segments[-1]["text"]
 
@@ -209,14 +222,16 @@ class Client:
         if translated:
             if self.translation_callback and callable(self.translation_callback):
                 try:
-                    self.translation_callback(" ".join(text), segments) # string, list
+                    self.translation_callback(" ".join(text), segments)  # string, list
                 except Exception as e:
                     print(f"[WARN] translation_callback raised: {e}")
                 return
         else:
             if self.transcription_callback and callable(self.transcription_callback):
                 try:
-                    self.transcription_callback(" ".join(text), segments) # string, list
+                    self.transcription_callback(
+                        " ".join(text), segments
+                    )  # string, list
                 except Exception as e:
                     print(f"[WARN] transcription_callback raised: {e}")
                 return
@@ -225,28 +240,51 @@ class Client:
             if self.enable_timestamps:
                 original_text_with_timestamps = [
                     {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
-                    for seg in self.transcript[-self.display_segments:]]
+                    for seg in self.transcript[-self.display_segments :]
+                ]
                 if self.last_segment is not None and not any(
                     data.get("text") == self.last_segment["text"]
-                    for data in original_text_with_timestamps):
-                    original_text_with_timestamps.append({
-                        "start": self.last_segment["start"],
-                        "end": self.last_segment["end"],
-                        "text": self.last_segment["text"]
-                    })
+                    for data in original_text_with_timestamps
+                ):
+                    original_text_with_timestamps.append(
+                        {
+                            "start": self.last_segment["start"],
+                            "end": self.last_segment["end"],
+                            "text": self.last_segment["text"],
+                        }
+                    )
                 utils.clear_screen()
-                utils.print_transcript(original_text_with_timestamps, timestamps=True, max_lines=self.display_segments)
+                utils.print_transcript(
+                    original_text_with_timestamps,
+                    timestamps=True,
+                    max_lines=self.display_segments,
+                )
 
                 if self.enable_translation:
                     print(f"\n\nTRANSLATION to {self.target_language}:")
-                    utils.print_transcript([
-                        {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
-                        for seg in self.translated_transcript[-self.display_segments:]
-                    ], timestamps=True, max_lines=self.display_segments)
+                    utils.print_transcript(
+                        [
+                            {
+                                "start": seg["start"],
+                                "end": seg["end"],
+                                "text": seg["text"],
+                            }
+                            for seg in self.translated_transcript[
+                                -self.display_segments :
+                            ]
+                        ],
+                        timestamps=True,
+                        max_lines=self.display_segments,
+                    )
 
             else:
-                original_text = [seg["text"] for seg in self.transcript[-self.display_segments:]]
-                if self.last_segment is not None and self.last_segment["text"] not in original_text:
+                original_text = [
+                    seg["text"] for seg in self.transcript[-self.display_segments :]
+                ]
+                if (
+                    self.last_segment is not None
+                    and self.last_segment["text"] not in original_text
+                ):
                     original_text.append(self.last_segment["text"])
                 utils.clear_screen()
                 utils.print_transcript(original_text, max_lines=self.display_segments)
@@ -254,9 +292,15 @@ class Client:
                 if self.enable_translation:
                     print(f"\n\nTRANSLATION to {self.target_language}:")
                     utils.print_transcript(
-                        [seg["text"] for seg in self.translated_transcript[-self.display_segments:]],
-                        translated=True, max_lines=self.display_segments)
-
+                        [
+                            seg["text"]
+                            for seg in self.translated_transcript[
+                                -self.display_segments :
+                            ]
+                        ],
+                        translated=True,
+                        max_lines=self.display_segments,
+                    )
 
     def on_message(self, ws, message):
         """
@@ -303,7 +347,7 @@ class Client:
 
         if "segments" in message.keys():
             self.process_segments(message["segments"])
-        
+
         if "translated_segments" in message.keys():
             self.process_segments(message["translated_segments"], translated=True)
 
@@ -340,7 +384,9 @@ class Client:
 
         if self._should_reconnect(close_status_code):
             self._retry_count += 1
-            print(f"[INFO]: Reconnecting ({self._retry_count}/{self.max_retries}) in {self.retry_delay}s...")
+            print(
+                f"[INFO]: Reconnecting ({self._retry_count}/{self.max_retries}) in {self.retry_delay}s..."
+            )
             time.sleep(self.retry_delay)
             self._create_websocket()
             self.ws_thread = threading.Thread(target=self.client_socket.run_forever)
@@ -438,17 +484,25 @@ class Client:
         if self.server_backend == "faster_whisper":
             if not self.transcript and self.last_segment is not None:
                 self.transcript.append(self.last_segment)
-            elif self.last_segment and self.transcript[-1]["text"] != self.last_segment["text"]:
+            elif (
+                self.last_segment
+                and self.transcript[-1]["text"] != self.last_segment["text"]
+            ):
                 self.transcript.append(self.last_segment)
             utils.create_srt_file(self.transcript, output_path)
 
         if self.enable_translation:
-            utils.create_srt_file(self.translated_transcript, self.translation_srt_file_path)
+            utils.create_srt_file(
+                self.translated_transcript, self.translation_srt_file_path
+            )
 
     def wait_before_disconnect(self):
         """Waits a bit before disconnecting in order to process pending responses."""
         assert self.last_response_received
-        while time.time() - self.last_response_received < self.disconnect_if_no_response_for:
+        while (
+            time.time() - self.last_response_received
+            < self.disconnect_if_no_response_for
+        ):
             continue
 
 
@@ -465,7 +519,14 @@ class TranscriptionTeeClient:
     Attributes:
         clients (list): the underlying Client instances responsible for handling WebSocket connections.
     """
-    def __init__(self, clients, save_output_recording=False, output_recording_filename="./output_recording.wav", mute_audio_playback=False):
+
+    def __init__(
+        self,
+        clients,
+        save_output_recording=False,
+        output_recording_filename="./output_recording.wav",
+        mute_audio_playback=False,
+    ):
         self.clients = clients
         if not self.clients:
             raise Exception("At least one client is required.")
@@ -503,9 +564,9 @@ class TranscriptionTeeClient:
             audio (str, optional): Path to an audio file for transcription. Default is None, which triggers live recording.
 
         """
-        assert sum(
-            source is not None for source in [audio, rtsp_url, hls_url]
-        ) <= 1, 'You must provide only one selected source'
+        assert sum(source is not None for source in [audio, rtsp_url, hls_url]) <= 1, (
+            "You must provide only one selected source"
+        )
 
         print("[INFO]: Waiting for server ready ...")
         for client in self.clients:
@@ -544,7 +605,7 @@ class TranscriptionTeeClient:
             unconditional (bool, optional): If true, send regardless of whether clients are recording.  Default is False.
         """
         for client in self.clients:
-            if (unconditional or client.recording):
+            if unconditional or client.recording:
                 client.send_packet_to_server(packet)
 
     def play_file(self, filename):
@@ -589,12 +650,12 @@ class TranscriptionTeeClient:
                         time.sleep(chunk_duration)
                     else:
                         self.stream.write(data)
-    
+
                 wavfile.close()
 
                 for client in self.clients:
                     client.wait_before_disconnect()
-                self.multicast_packet(Client.END_OF_AUDIO.encode('utf-8'), True)
+                self.multicast_packet(Client.END_OF_AUDIO.encode("utf-8"), True)
                 self.write_all_clients_srt()
                 if self.stream:
                     self.stream.close()
@@ -618,14 +679,16 @@ class TranscriptionTeeClient:
         """
         print("[INFO]: Connecting to RTSP stream...")
         try:
-            container = av.open(rtsp_url, format="rtsp", options={"rtsp_transport": "tcp"})
+            container = av.open(
+                rtsp_url, format="rtsp", options={"rtsp_transport": "tcp"}
+            )
             self.process_av_stream(container, stream_type="RTSP")
         except Exception as e:
             print(f"[ERROR]: Failed to process RTSP stream: {e}")
         finally:
             for client in self.clients:
                 client.wait_before_disconnect()
-            self.multicast_packet(Client.END_OF_AUDIO.encode('utf-8'), True)
+            self.multicast_packet(Client.END_OF_AUDIO.encode("utf-8"), True)
             self.close_all_clients()
             self.write_all_clients_srt()
         print("[INFO]: RTSP stream processing finished.")
@@ -647,7 +710,7 @@ class TranscriptionTeeClient:
         finally:
             for client in self.clients:
                 client.wait_before_disconnect()
-            self.multicast_packet(Client.END_OF_AUDIO.encode('utf-8'), True)
+            self.multicast_packet(Client.END_OF_AUDIO.encode("utf-8"), True)
             self.close_all_clients()
             self.write_all_clients_srt()
         print("[INFO]: HLS stream processing finished.")
@@ -669,7 +732,9 @@ class TranscriptionTeeClient:
         output_container = None
         if save_file:
             output_container = av.open(save_file, mode="w")
-            output_audio_stream = output_container.add_stream(codec_name="pcm_s16le", rate=self.rate)
+            output_audio_stream = output_container.add_stream(
+                codec_name="pcm_s16le", rate=self.rate
+            )
 
         try:
             for packet in container.demux(audio_stream):
@@ -684,7 +749,7 @@ class TranscriptionTeeClient:
         finally:
             # Wait for server to send any leftover transcription.
             time.sleep(5)
-            self.multicast_packet(Client.END_OF_AUDIO.encode('utf-8'), True)
+            self.multicast_packet(Client.END_OF_AUDIO.encode("utf-8"), True)
             if output_container:
                 output_container.close()
             container.close()
@@ -699,7 +764,10 @@ class TranscriptionTeeClient:
         """
         t = threading.Thread(
             target=self.write_audio_frames_to_file,
-            args=(self.frames[:], f"chunks/{n_audio_file}.wav",),
+            args=(
+                self.frames[:],
+                f"chunks/{n_audio_file}.wav",
+            ),
         )
         t.start()
 
@@ -880,6 +948,7 @@ class TranscriptionClient(TranscriptionTeeClient):
         transcript = transcription_client()
         ```
     """
+
     def __init__(
         self,
         host,
@@ -912,7 +981,6 @@ class TranscriptionClient(TranscriptionTeeClient):
         initial_prompt=None,
         vad_parameters=None,
     ):
-
         self.client = Client(
             host,
             port,
@@ -943,22 +1011,30 @@ class TranscriptionClient(TranscriptionTeeClient):
         )
 
         if save_output_recording and not output_recording_filename.endswith(".wav"):
-            raise ValueError(f"Please provide a valid `output_recording_filename`: {output_recording_filename}")
+            raise ValueError(
+                f"Please provide a valid `output_recording_filename`: {output_recording_filename}"
+            )
         if not output_transcription_path.endswith(".srt"):
-            raise ValueError(f"Please provide a valid `output_transcription_path`: {output_transcription_path}. The file extension should be `.srt`.")
+            raise ValueError(
+                f"Please provide a valid `output_transcription_path`: {output_transcription_path}. The file extension should be `.srt`."
+            )
         if not translation_srt_file_path.endswith(".srt"):
-            raise ValueError(f"Please provide a valid `translation_srt_file_path`: {translation_srt_file_path}. The file extension should be `.srt`.")
+            raise ValueError(
+                f"Please provide a valid `translation_srt_file_path`: {translation_srt_file_path}. The file extension should be `.srt`."
+            )
         TranscriptionTeeClient.__init__(
             self,
             [self.client],
             save_output_recording=save_output_recording,
             output_recording_filename=output_recording_filename,
-            mute_audio_playback=mute_audio_playback
+            mute_audio_playback=mute_audio_playback,
         )
 
     def __call__(self, audio=None, rtsp_url=None, hls_url=None, save_file=None):
         """Run transcription and return the completed transcript as text."""
-        super().__call__(audio=audio, rtsp_url=rtsp_url, hls_url=hls_url, save_file=save_file)
+        super().__call__(
+            audio=audio, rtsp_url=rtsp_url, hls_url=hls_url, save_file=save_file
+        )
         return " ".join(segment["text"].strip() for segment in self.client.transcript)
 
 
@@ -968,7 +1044,14 @@ PcmFormat = Literal["float32", "int16"]
 class _HookedClient(Client):
     """Client subclass that exposes lifecycle callbacks not available on the base class."""
 
-    def __init__(self, *args, on_session_started=None, on_error_hook=None, on_close_hook=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        on_session_started=None,
+        on_error_hook=None,
+        on_close_hook=None,
+        **kwargs,
+    ):
         self._on_session_started = on_session_started
         self._on_error_hook = on_error_hook
         self._on_close_hook = on_close_hook
@@ -1054,6 +1137,8 @@ class StreamingTranscriptionClient:
         on_translation: Optional[Callable[[str, list], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
+        ## hotwords
+        hotwords: Optional[str] = None,
     ):
         self._on_partial_transcript = on_partial_transcript
         self._on_committed_transcript = on_committed_transcript
@@ -1081,6 +1166,7 @@ class StreamingTranscriptionClient:
             on_session_started=on_session_started,
             on_error_hook=on_error,
             on_close_hook=on_close,
+            hotwords=hotwords,
         )
 
     def _dispatch_transcript(self, text: str, segments: list) -> None:
@@ -1104,7 +1190,9 @@ class StreamingTranscriptionClient:
         deadline = time.time() + self._ready_timeout
         while not self._client.recording:
             if self._client.server_error:
-                raise RuntimeError(getattr(self._client, "error_message", "Server reported an error."))
+                raise RuntimeError(
+                    getattr(self._client, "error_message", "Server reported an error.")
+                )
             if self._client.waiting:
                 raise RuntimeError("Server is full.")
             if time.time() > deadline:
@@ -1126,7 +1214,9 @@ class StreamingTranscriptionClient:
         if pcm_format == "float32":
             payload = audio_bytes
         elif pcm_format == "int16":
-            samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            samples = (
+                np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            )
             payload = samples.tobytes()
         else:
             raise ValueError(f"Unsupported pcm_format: {pcm_format!r}")

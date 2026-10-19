@@ -1,14 +1,15 @@
-import os
 import json
 import logging
+import os
 import threading
 import time
-import torch
+
 import ctranslate2
+import torch
 from huggingface_hub import snapshot_download
 
-from whisper_live.transcriber.transcriber_faster_whisper import WhisperModel
 from whisper_live.backend.base import ServeClientBase
+from whisper_live.transcriber.transcriber_faster_whisper import WhisperModel
 
 
 class ServeClientFasterWhisper(ServeClientBase):
@@ -33,7 +34,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         use_vad=True,
         single_model=False,
         send_last_n_segments=10,
-        no_speech_thresh=0.45,
+        no_speech_thresh=0.35,
         clip_audio=False,
         same_output_threshold=7,
         cache_path="~/.cache/whisper-live/",
@@ -76,17 +77,34 @@ class ServeClientFasterWhisper(ServeClientBase):
         )
         self.cache_path = cache_path
         self.model_sizes = [
-            "tiny", "tiny.en", "base", "base.en", "small", "small.en",
-            "medium", "medium.en", "large-v2", "large-v3", "distil-small.en",
-            "distil-medium.en", "distil-large-v2", "distil-large-v3",
-            "large-v3-turbo", "turbo"
+            "tiny",
+            "tiny.en",
+            "base",
+            "base.en",
+            "small",
+            "small.en",
+            "medium",
+            "medium.en",
+            "large-v2",
+            "large-v3",
+            "distil-small.en",
+            "distil-medium.en",
+            "distil-large-v2",
+            "distil-large-v3",
+            "large-v3-turbo",
+            "turbo",
         ]
 
         self.model_size_or_path = model
         self.language = "en" if self.model_size_or_path.endswith("en") else language
         self.task = task
         self.initial_prompt = initial_prompt
-        self.vad_parameters = vad_parameters or {"threshold": 0.5}
+        self.vad_parameters = vad_parameters or {
+            "threshold": 0.75,
+            "min_speech_duration_ms": 250,
+            "min_silence_duration_ms": 500,
+            "speech_pad_ms": 200,
+        }
         self.hotwords = hotwords
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -99,7 +117,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         if self.model_size_or_path is None:
             return
         logging.info(f"Using Device={device} with precision {self.compute_type}")
-    
+
         try:
             if single_model:
                 if ServeClientFasterWhisper.SINGLE_MODEL is None:
@@ -112,11 +130,15 @@ class ServeClientFasterWhisper(ServeClientBase):
                 self.create_model(device)
         except Exception as e:
             logging.error(f"Failed to load model: {e}")
-            self.websocket.send(json.dumps({
-                "uid": self.client_uid,
-                "status": "ERROR",
-                "message": f"Failed to load model: {str(self.model_size_or_path)}"
-            }))
+            self.websocket.send(
+                json.dumps(
+                    {
+                        "uid": self.client_uid,
+                        "status": "ERROR",
+                        "message": f"Failed to load model: {str(self.model_size_or_path)}",
+                    }
+                )
+            )
             self.websocket.close()
             return
 
@@ -130,7 +152,7 @@ class ServeClientFasterWhisper(ServeClientBase):
                 {
                     "uid": self.client_uid,
                     "message": self.SERVER_READY,
-                    "backend": "faster_whisper"
+                    "backend": "faster_whisper",
                 }
             )
         )
@@ -150,22 +172,26 @@ class ServeClientFasterWhisper(ServeClientBase):
                 model_to_load = model_ref
             else:
                 local_snapshot = snapshot_download(
-                    repo_id = model_ref,
-                    repo_type = "model",
+                    repo_id=model_ref,
+                    repo_type="model",
                 )
                 if ctranslate2.contains_model(local_snapshot):
                     model_to_load = local_snapshot
                 else:
-                    cache_root = os.path.expanduser(os.path.join(self.cache_path, "whisper-ct2-models/"))
+                    cache_root = os.path.expanduser(
+                        os.path.join(self.cache_path, "whisper-ct2-models/")
+                    )
                     os.makedirs(cache_root, exist_ok=True)
                     safe_name = model_ref.replace("/", "--")
                     ct2_dir = os.path.join(cache_root, safe_name)
 
                     if not ctranslate2.contains_model(ct2_dir):
-                        logging.info(f"Converting '{model_ref}' to CTranslate2 @ {ct2_dir}")
+                        logging.info(
+                            f"Converting '{model_ref}' to CTranslate2 @ {ct2_dir}"
+                        )
                         ct2_converter = ctranslate2.converters.TransformersConverter(
-                            local_snapshot, 
-                            copy_files=["tokenizer.json", "preprocessor_config.json"]
+                            local_snapshot,
+                            copy_files=["tokenizer.json", "preprocessor_config.json"],
                         )
                         ct2_converter.convert(
                             output_dir=ct2_dir,
@@ -194,15 +220,29 @@ class ServeClientFasterWhisper(ServeClientBase):
         """
         if info.language_probability > 0.5:
             self.language = info.language
-            logging.info(f"Detected language {self.language} with probability {info.language_probability}")
-            self.websocket.send(json.dumps(
-                {"uid": self.client_uid, "language": self.language, "language_prob": info.language_probability}))
+            logging.info(
+                f"Detected language {self.language} with probability {info.language_probability}"
+            )
+            self.websocket.send(
+                json.dumps(
+                    {
+                        "uid": self.client_uid,
+                        "language": self.language,
+                        "language_prob": info.language_probability,
+                    }
+                )
+            )
 
     def get_audio_chunk_for_processing(self):
         input_bytes, duration = super().get_audio_chunk_for_processing()
-        if ServeClientFasterWhisper.BATCH_WORKER is None or duration <= self.BATCH_MAX_CHUNK_S:
+        if (
+            ServeClientFasterWhisper.BATCH_WORKER is None
+            or duration <= self.BATCH_MAX_CHUNK_S
+        ):
             return input_bytes, duration
-        return input_bytes[: self.BATCH_MAX_CHUNK_S * self.RATE], float(self.BATCH_MAX_CHUNK_S)
+        return input_bytes[: self.BATCH_MAX_CHUNK_S * self.RATE], float(
+            self.BATCH_MAX_CHUNK_S
+        )
 
     def transcribe_audio(self, input_sample):
         """
@@ -223,6 +263,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         # Batch inference path: submit to central queue and wait
         if ServeClientFasterWhisper.BATCH_WORKER is not None:
             from whisper_live.batch_inference import BatchRequest, prepare_features
+
             request = BatchRequest(
                 audio=input_sample,
                 language=self.language,
@@ -259,7 +300,8 @@ class ServeClientFasterWhisper(ServeClientBase):
             vad_filter=self.use_vad,
             vad_parameters=self.vad_parameters if self.use_vad else None,
             hotwords=self.hotwords,
-            word_timestamps=self.word_timestamps)
+            word_timestamps=self.word_timestamps,
+        )
         if ServeClientFasterWhisper.SINGLE_MODEL:
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
 
