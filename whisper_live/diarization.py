@@ -9,7 +9,16 @@ Install: pip install pyannote.audio
 """
 
 import logging
+
 import numpy as np
+import torch
+from pyannote.audio import Inference, Model
+from pyannote.audio.core.task import (
+    Problem,
+    Resolution,
+    Specifications,
+)
+from torch.torch_version import TorchVersion
 
 
 def load_audio(file_path, sample_rate=16000):
@@ -61,6 +70,9 @@ class SpeakerDiarizer:
         embedding_model="pyannote/wespeaker-voxceleb-resnet34-LM",
         hf_token=None,
         speaker_names=None,
+        enrolled_only=False,
+        known_speaker_threshold=0.40,
+        known_speaker_margin=0.05,
     ):
         self.similarity_threshold = similarity_threshold
         self.max_speakers = max_speakers
@@ -70,6 +82,10 @@ class SpeakerDiarizer:
         self._model = None
         self._embedding_model_name = embedding_model
         self._hf_token = hf_token
+        self.enrolled_only = enrolled_only
+        self.known_speaker_threshold = known_speaker_threshold
+        self.enrolled_speakers = set()
+        self.known_speaker_margin = known_speaker_margin
 
     def _next_speaker_id(self):
         if self._speaker_count < len(self.speaker_names):
@@ -81,13 +97,23 @@ class SpeakerDiarizer:
         if self._model is not None:
             return
         try:
-            from pyannote.audio import Model, Inference
-            import torch
-
-            model = Model.from_pretrained(
-                self._embedding_model_name,
-                use_auth_token=self._hf_token,
-            )
+            # model = Model.from_pretrained(
+            #     self._embedding_model_name,
+            #     use_auth_token=self._hf_token,
+            # )
+            # Allow trusted checkpoint metadata classes.
+            with torch.serialization.safe_globals(
+                [
+                    TorchVersion,
+                    Specifications,
+                    Problem,
+                    Resolution,
+                ]
+            ):
+                model = Model.from_pretrained(
+                    self._embedding_model_name,
+                    use_auth_token=self._hf_token,
+                )
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self._model = Inference(model, window="whole", device=torch.device(device))
             logging.info(f"Speaker embedding model loaded on {device}")
@@ -137,6 +163,54 @@ class SpeakerDiarizer:
         if embedding is None:
             return None
 
+        # Enrolled-only mode:
+        # Match against registered speakers only.
+        # Never create dynamic clusters or update reference embeddings.
+        if self.enrolled_only:
+            scores = []
+
+            for speaker_id in sorted(self.enrolled_speakers):
+                stored = self.speakers.get(speaker_id)
+
+                if stored is None:
+                    continue
+
+                sim = self._cosine_similarity(embedding, stored)
+
+                scores.append((sim, speaker_id))
+
+            scores.sort(reverse=True)
+
+            if not scores:
+                logging.warning("[Speaker Registry] No enrolled speakers")
+                return "UNKNOWN"
+
+            best_sim, best_speaker = scores[0]
+
+            second_sim = scores[1][0] if len(scores) > 1 else None
+
+            threshold_ok = best_sim >= self.known_speaker_threshold
+
+            margin_ok = (
+                second_sim is None or best_sim - second_sim >= self.known_speaker_margin
+            )
+
+            result = best_speaker if threshold_ok and margin_ok else "UNKNOWN"
+
+            logging.info(
+                "[Speaker Registry Match] "
+                "best=%s score=%.3f second=%s "
+                "threshold=%.3f margin=%.3f result=%s",
+                best_speaker,
+                best_sim,
+                (f"{second_sim:.3f}" if second_sim is not None else "N/A"),
+                self.known_speaker_threshold,
+                self.known_speaker_margin,
+                result,
+            )
+
+            return result
+
         best_speaker = None
         best_sim = -1.0
 
@@ -145,7 +219,27 @@ class SpeakerDiarizer:
             if sim > best_sim:
                 best_sim = sim
                 best_speaker = speaker_id
+        # log similarity for debugging
+        known_similarity = (
+            self._cosine_similarity(
+                embedding,
+                self.speakers["Junas_001"],
+            )
+            if "Junas_001" in self.speakers
+            else None
+        )
 
+        logging.info(
+            "[Speaker Match] best=%s best_sim=%.3f "
+            "Junas_001_sim=%s threshold=%.3f "
+            "audio=%.2fs clusters=%d",
+            best_speaker,
+            best_sim,
+            f"{known_similarity:.3f}" if known_similarity is not None else "N/A",
+            self.similarity_threshold,
+            len(audio_np) / sample_rate,
+            len(self.speakers),
+        )
         if best_sim >= self.similarity_threshold:
             # Update running average for the matched speaker
             self.speakers[best_speaker] = (
@@ -168,14 +262,40 @@ class SpeakerDiarizer:
         return speaker_id
 
     def enroll_speaker(self, speaker_name, audio_np, sample_rate=16000):
-        """Enroll a known speaker from reference audio."""
         embedding = self._compute_embedding(audio_np, sample_rate)
+
         if embedding is None:
             return False
-        self.speakers[speaker_name] = embedding
+
+        return self.enroll_embedding(speaker_name, embedding)
+
+    def enroll_embedding(self, speaker_name, embedding):
+        """Register a precomputed speaker embedding."""
+
+        vector = np.asarray(embedding, dtype=np.float32).reshape(-1).copy()
+
+        if vector.size == 0 or not np.all(np.isfinite(vector)):
+            raise ValueError(f"Invalid embedding for {speaker_name}")
+
+        norm = np.linalg.norm(vector)
+
+        if not np.isfinite(norm) or norm < 1e-8:
+            raise ValueError(f"Invalid embedding norm for {speaker_name}")
+
+        vector /= norm
+
+        # Registered embeddings must use compatible dimensions.
+        for existing_id in self.enrolled_speakers:
+            if self.speakers[existing_id].shape != vector.shape:
+                raise ValueError("Incompatible speaker embedding dimensions")
+
+        self.speakers[speaker_name] = vector
+        self.enrolled_speakers.add(speaker_name)
+
         return True
 
     def reset(self):
         """Reset all speaker state."""
         self.speakers.clear()
         self._speaker_count = 0
+        self.enrolled_speakers.clear()

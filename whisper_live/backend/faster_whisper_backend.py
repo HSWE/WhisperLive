@@ -35,7 +35,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         single_model=False,
         send_last_n_segments=10,
         no_speech_thresh=0.35,
-        clip_audio=False,
+        clip_audio=True,
         same_output_threshold=7,
         cache_path="~/.cache/whisper-live/",
         translation_queue=None,
@@ -301,6 +301,10 @@ class ServeClientFasterWhisper(ServeClientBase):
             vad_parameters=self.vad_parameters if self.use_vad else None,
             hotwords=self.hotwords,
             word_timestamps=self.word_timestamps,
+            # test
+            condition_on_previous_text=False,
+            no_speech_threshold=0.4,
+            temperature=0.0,
         )
         if ServeClientFasterWhisper.SINGLE_MODEL:
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()

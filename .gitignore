@@ -20,6 +20,9 @@ output*.srt
 transcript*.srt
 translation*.srt
 *.wav
+*.m4a
 docs/site/
 Audio-Transcription-Chrome/node_modules/
 Audio-Transcription-Chrome/package-lock.json
+
+/data/

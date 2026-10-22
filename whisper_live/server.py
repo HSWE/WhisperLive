@@ -453,8 +453,25 @@ class TranscriptionServer:
                             )
                             worker.start()
                             ServeClientFasterWhisper.BATCH_WORKER = worker
-        except Exception as e:
-            logging.error(e)
+        except Exception:
+            logging.exception("Failed to initialize WhisperLive client")
+
+            try:
+                websocket.send(
+                    json.dumps(
+                        {
+                            "uid": options["uid"],
+                            "status": "ERROR",
+                            "message": (
+                                "WhisperLive initialization failed. Check server logs."
+                            ),
+                        }
+                    )
+                )
+                websocket.close()
+            except Exception:
+                pass
+
             return
 
         if client is None:
@@ -479,30 +496,87 @@ class TranscriptionServer:
         self.client_manager.add_client(websocket, client)
 
     def _create_diarizer(self, options):
-        """Create a SpeakerDiarizer if the client requested diarization.
+        """Create diarizer using registry IDs or legacy WAV enrollment."""
 
-        Diarization is created when the handshake sets ``enable_diarization`` or
-        carries ``known_speakers``. Each known speaker is a dict with a ``name``
-        and base64-encoded reference audio under ``audio_base64``.
+        from whisper_live.diarization import SpeakerDiarizer
+        from whisper_live.speaker_registry import (
+            DEFAULT_MODEL,
+            SpeakerRegistry,
+        )
 
-        Returns:
-            SpeakerDiarizer or None
-        """
-        known_speakers = options.get("known_speakers") or []
-        if not options.get("enable_diarization", False) and not known_speakers:
+        known_ids = options.get("known_speaker_ids") or []
+        legacy_speakers = options.get("known_speakers") or []
+
+        if not isinstance(known_ids, list) or not all(
+            isinstance(item, str) for item in known_ids
+        ):
+            raise ValueError("known_speaker_ids must be a list of strings")
+
+        if len(known_ids) > 32:
+            raise ValueError("Too many known speakers")
+
+        if len(known_ids) != len(set(known_ids)):
+            raise ValueError("Duplicate known speaker IDs")
+
+        if known_ids and legacy_speakers:
+            raise ValueError("Use known_speaker_ids OR known_speakers, not both")
+
+        if not (
+            options.get("enable_diarization", False) or known_ids or legacy_speakers
+        ):
             return None
-        try:
-            from whisper_live.diarization import SpeakerDiarizer
 
-            diarizer = SpeakerDiarizer(
-                similarity_threshold=options.get("diarization_threshold", 0.55),
-                max_speakers=max(options.get("max_speakers", 10), len(known_speakers)),
-                hf_token=options.get("hf_token"),
+        model_name = os.getenv(
+            "WHISPERLIVE_SPEAKER_MODEL",
+            DEFAULT_MODEL,
+        )
+
+        diarizer = SpeakerDiarizer(
+            similarity_threshold=options.get("diarization_threshold", 0.55),
+            max_speakers=max(
+                options.get("max_speakers", 10),
+                len(known_ids),
+                len(legacy_speakers),
+            ),
+            embedding_model=model_name,
+            hf_token=options.get("hf_token"),
+            enrolled_only=options.get("enrolled_only", bool(known_ids)),
+            known_speaker_threshold=options.get("known_speaker_threshold", 0.40),
+            known_speaker_margin=options.get("known_speaker_margin", 0.05),
+        )
+
+        if known_ids:
+            registry_dir = os.getenv("WHISPERLIVE_SPEAKER_REGISTRY_DIR")
+
+            if not registry_dir:
+                raise RuntimeError("WHISPERLIVE_SPEAKER_REGISTRY_DIR is not configured")
+
+            registry = SpeakerRegistry(
+                registry_dir,
+                model_name=model_name,
             )
-        except ImportError:
-            logging.warning("pyannote.audio not installed; diarization disabled")
-            return None
-        self._enroll_known_speakers(diarizer, known_speakers)
+
+            for speaker_id in known_ids:
+                embedding = registry.load(speaker_id)
+
+                diarizer.enroll_embedding(speaker_id, embedding)
+
+                logging.info(
+                    "[Speaker Registry] Loaded speaker=%s",
+                    speaker_id,
+                )
+
+            logging.info(
+                "[Speaker Registry] Ready: speakers=%d enrolled_only=%s",
+                len(known_ids),
+                diarizer.enrolled_only,
+            )
+
+            return diarizer
+
+        # Backward compatibility with existing WAV enrollment.
+        self._enroll_known_speakers(diarizer, legacy_speakers)
+
         return diarizer
 
     @staticmethod
